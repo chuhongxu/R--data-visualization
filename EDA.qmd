@@ -1,0 +1,350 @@
+
+---
+title: "Exploratory Data Analysis for Collagen Diseases Data"
+
+
+
+```{r, echo=FALSE,message=FALSE,warning=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(mice)
+library(VIM)
+library(naniar)
+library(lubridate)
+```
+
+## Data summary
+
+Collagen disease is a kind of auto-immune disease that patients will generate antibodies to attack to themselves. There are different kinds of collagen diseases, and thrombosis is one of the most important and severe issues among all the categories. 
+
+These given data sets contain information of patients who came to the outpatient clinic on collagen disease, and laboratory examinations of patients. Especially, special laboratory examinations for certain patients include data that highly related to thrombosis.
+
+## Initial questions
+
+- 1. Does age influence the degree of thrombosis when the patients take the examinations?
+- 2. Does observed pattern of anti-nucleus antibody highly relate to the degree of thrombosis?
+- 3. What is the relationship between anti-Cardiolipin antibody and thrombosis?
+
+## Data munging
+
+```{r}
+dfa <- read.csv("./data/TSUMOTO_A.csv")
+dfb <- read.csv("./data/TSUMOTO_B.csv")
+dfc <- read.csv("./data/TSUMOTO_C.csv", stringsAsFactors = FALSE, fileEncoding = "latin1")
+```
+
+First of all, remove the duplicated rows and look at the dimensions of three data sets:
+
+```{r}
+dfa <- dfa[!duplicated(dfa$ID), ]
+dfb <- dfb[!duplicated(dfb$ID), ]
+dfc <- dfc[!duplicated(dfc), ]
+
+print(dim(dfa))
+print(dim(dfb))
+print(dim(dfc))
+```
+
+Remove all the columns with no ID, because we can not connect these rows to any patient.
+
+```{r}
+# convert "" to NA
+dfa <- replace_with_na_all(dfa, ~ .x == "")
+dfb <- replace_with_na_all(dfb, ~ .x == "")
+
+# remove rows where ID is NA
+dfa <- dfa[!is.na(dfa$ID), ]
+dfb <- dfb[!is.na(dfb$ID), ]
+dfc <- dfc[!is.na(dfc$ID), ]
+```
+
+Remove columns with too much missing values in dfc:
+
+```{r}
+dfc <- dfc[, colSums(is.na(dfc)) < 5000]
+```
+
+Data merging:
+```{r}
+df_ab <- merge(dfa, dfb, by = "ID")
+df_abc <- merge(df_ab, dfc, by = "ID")
+```
+
+Note that 'df_abc' is a table with too much rows, columns and duplicated values, we will mainly use 'df_ab' to do further analysis because special laboratory examination results in 'dfb' is more related to what we want to investigate in this project.
+
+Refine the merged data set 'df_ab':
+
+```{r}
+# change the column names to lower case
+names(df_ab) <- tolower(names(df_ab))
+
+# remove the columns that is not very helpful to our investigation
+df_ab <- df_ab[, !colnames(df_ab) %in% c("description", "first.date", "diagnosis.x", "diagnosis.y", "symptoms", "kct", "rvvt", "lac", "admission")]
+
+print(dim(df_ab))
+
+head(df_ab)
+```
+
+We notice that there are only 417 rows in this merged data, which means only 417 patients from the first data set did the special laboratory examination. In the subsequent EDA part, we will mainly focus on these 417 patients.
+
+Sanity check for our target variable 'thrombosis':
+```{r}
+table(df_ab$thrombosis)
+```
+
+We can see that thrombosis of 5 patients are '3', which does not makes sense. Delete these five columns.
+```{r}
+df_ab <- df_ab[df_ab$thrombosis != 3, ]
+```
+
+Create some new variables for 'df_ab':
+```{r}
+# aggregate three columns 'acl.iga', 'acl.igg', 'acl.igm' into one column
+df_ab$acl_total <- df_ab$acl.iga + df_ab$acl.igg + df_ab$acl.igm
+
+# calculate the age when patients did the examinations
+df_ab$age <- year(as.Date(df_ab$examination.date)) - year(as.Date(df_ab$birthday))
+
+# change the data type of 'ana' and calculate the log
+df_ab$ana <- as.numeric(df_ab$ana)
+df_ab$ana[is.na(df_ab$ana)] <- 0
+df_ab$ana <- log2(df_ab$ana)
+df_ab[df_ab$ana == -Inf, "ana"] <- 0
+
+# change the data type of 'thrombosis'
+df_ab$thrombosis <- as.factor(df_ab$thrombosis)
+
+# change the data type of 'sex'
+df_ab$sex <- as.factor(df_ab$sex)
+
+# refine the variable 'ana.pattern'
+df_ab$ana_pattern <- ""
+df_ab$ana.pattern[is.na(df_ab$ana.pattern)] <- ""
+df_ab[df_ab$ana.pattern == "P" | df_ab$ana.pattern == "p", "ana_pattern"] <- "P"
+df_ab[df_ab$ana.pattern == "S", "ana_pattern"] <- "S"
+df_ab[df_ab$ana.pattern == "P,S" | df_ab$ana.pattern == "S,P" | df_ab$ana.pattern == "P.S", "ana_pattern"] <- "P,S"
+df_ab[df_ab$ana_pattern == "", "ana_pattern"] <- "others"
+
+# remove the columns that are not necessary due to new variables
+df_ab <- df_ab[, !colnames(df_ab) %in% c("birthday", "examination.date", "acl.igg", "acl.igm", "ana.pattern", "acl.iga")]
+```
+
+```{r}
+head(df_ab)
+```
+
+## Exploratory analysis
+
+### Phase I
+
+First check the missing values distribution:
+```{r}
+aggr(df_ab, prop = F, number = F, combined = F)
+```
+
+Only two columns 'sex' and 'age' contain missing values and the fraction of missing values is very small.
+
+Then check the summary of all the columns:
+```{r}
+summary(df_ab)
+```
+
+From this summary, we can see that thrombosis of most patients who did the special examination is negative.
+
+Visualize the distribution of age:
+```{r}
+hist(df_ab$age, main = "Distribution of age", xlab = "age")
+```
+
+We can see that the ages of patients range from 3 to 73, and a large amount of them are between 20 and 30 years old.
+
+Draw a boxplot for acl_total
+```{r}
+boxplot(df_ab$acl_total, main = "Boxplot of acl_total")
+```
+
+Obviously, there is an extreme outlier of this variable. Lets remove it and check again.
+
+```{r}
+df_ab[df_ab$acl_total > 500, "acl_total"] <- median(df_ab$acl_total)
+boxplot(df_ab$acl_total, main = "Boxplot of acl_total")
+```
+
+According to this plot, most of the values are below 50, but several values are much larger than others.
+
+### Phase II
+
+Consider the first question: Does age influence the degree of thrombosis when the patients take the examinations?
+Plot a histogram of age with three different categories of degree of thrombosis.
+```{r,message=FALSE,warning=FALSE}
+ggplot(df_ab, aes(x = age, fill = thrombosis)) +
+  geom_histogram() +
+  ggtitle("Histogram of age with different thrombosis categories")
+```
+
+According to this plot, ages of patients with negative thrombosis seems to follow a normal like distribution with slight skewness. However, ages of positive patients distribute more evenly. We also notice that most patients whose degrees of thrombosis are positive and very severe (represented by '2') are below 50 years old. Lets further check this by creating a boxplot as follows.
+
+```{r,warning=FALSE}
+ggplot(df_ab, aes(x = thrombosis, y = age, fill = thrombosis)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of age with different thrombosis categories")
+```
+
+From this plot, we can see more clearly that the patients whose degrees of thrombosis are positive and very severe tend to have relatively smaller age than other two categories of patients.
+
+Consider the second question: Does observed pattern of anti-nucleus antibody highly relate to the degree of thrombosis?
+
+```{r}
+ggplot(df_ab, aes(x = thrombosis, fill = ana_pattern)) +
+  geom_bar(position = "fill") +
+  ggtitle("Barplot of anti-nucleus antibody pattern with different thrombosis categories") +
+  labs(y = "Ratio")
+```
+
+According to this plot, we can clearly notice that the ratio of anti-nucleus antibody pattern within each of three groups of patients are very different. As degree of thrombosis gets more severe, proportion of pattern 'S' increases a lot, while proportion of pattern 'P' decreases. 
+
+Now consider the third question: What is the relationship between anti-Cardiolipin antibody and thrombosis?
+
+```{r}
+ggplot(subset(df_ab, df_ab$acl_total < 150), aes(x = thrombosis, y = acl_total, fill = thrombosis)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of anti-Cardiolipin antibody with different thrombosis categories")
+```
+
+From this plot, we can see that patients with negative thrombosis tend to have a lower average value of anti-Cardiolipin antibody. This suggest there exists certain relationship between degree of thrombosis and anti-Cardiolipin antibody.
+
+After investigating on the three initial questions, I am now curious about the relationship between anti-Cardiolipin antibody and age. Will the degree of this kind of antibody increase or decrease over time? Additionally, I also consider the gender of patients in this analysis.
+
+```{r,warning=FALSE}
+dfnew <- df_ab[!is.na(df_ab$sex), ]
+plot0 <- ggplot(data = subset(dfnew, dfnew$acl_total < 150), aes(x = age, y = acl_total, color = thrombosis)) +
+  theme_bw() +
+  geom_point(size = 1.4) +
+  facet_grid(cols = vars(sex)) +
+  labs(
+    title = "Relation between anti-Cardiolipin antibody and age by different sex",
+    y = "anti-Cardiolipin antibody",
+    x = "age"
+  )
+
+plot(plot0)
+```
+
+This plot provides much information. First, we can see that female patients are much more than male patients in this data set. Second and more important, we can not notify any obvious relationship between anti-Cardiolipin antibody and age. In different age periods, degrees of anti-Cardiolipin antibody seem to have similar distribution. Third, we can notice that patients with negative thrombosis (represented by red points) scatter more densely towards the x-axis, which means these part of patients have lower degree of anti-Cardiolipin antibody. This is consistent to the conclusion in last plot.
+
+## Final plots
+
+In this part, I will refine the visualization process in EDA part above and create four final plots.
+
+### Plot 1
+```{r,message=FALSE,warning=FALSE}
+plot1 <- ggplot(df_ab, aes(x = age, fill = thrombosis)) +
+  geom_histogram() +
+  ggtitle("Histogram of age with different thrombosis categories") +
+  labs(
+    x = "Age",
+    y = "Count"
+  ) +
+  theme(
+    text = element_text(size = 12),
+    legend.position = "right"
+  ) +
+  guides(fill = guide_legend(title = "Thrombosis degree"))
+
+plot(plot1)
+ggsave("./images/plot-01.png", width = 10, height = 7)
+```
+
+### Plot 2
+```{r,warning=FALSE}
+
+plot2 <- ggplot(df_ab, aes(x = thrombosis, y = age, fill = thrombosis)) +
+  geom_boxplot(outlier.colour = "purple", outlier.shape = 1, outlier.size = 3) +
+  ggtitle("Boxplot of age with different thrombosis categories") +
+  labs(
+    x = "Thrombosis degree",
+    y = "Age"
+  ) +
+  theme(
+    text = element_text(size = 12),
+    legend.position = "right"
+  ) +
+  guides(fill = guide_legend(title = "Thrombosis degree"))
+
+plot(plot2)
+ggsave("./images/plot-02.png", width = 10, height = 7)
+
+```
+
+### Plot 3
+```{r}
+
+plot3 <- ggplot(df_ab, aes(x = thrombosis, fill = ana_pattern)) +
+  geom_bar(position = "fill") +
+  ggtitle("Barplot of anti-nucleus antibody pattern with different thrombosis categories") +
+  labs(
+    x = "Thrombosis degree",
+    y = "Ratio"
+  ) +
+  theme(
+    text = element_text(size = 12),
+    legend.position = "right"
+  ) +
+  guides(fill = guide_legend(title = "Anti-nucleus antibody pattern"))
+
+plot(plot3)
+ggsave("./images/plot-03.png", width = 10, height = 7)
+
+```
+
+### Plot 4
+```{r}
+
+plot4 <- ggplot(subset(df_ab, df_ab$acl_total < 150), aes(x = thrombosis, y = acl_total, fill = thrombosis)) +
+  geom_boxplot(outlier.colour = "purple", outlier.shape = 1, outlier.size = 3) +
+  ggtitle("Boxplot of anti-Cardiolipin antibody with different thrombosis categories") +
+  labs(
+    x = "Thrombosis degree",
+    y = "Anti-Cardiolipin antibody degree"
+  ) +
+  theme(
+    text = element_text(size = 12),
+    legend.position = "right"
+  ) +
+  guides(fill = guide_legend(title = "Thrombosis degree"))
+
+plot(plot4)
+ggsave("./images/plot-04.png", width = 10, height = 7)
+
+```
+
+### Plot 5
+```{r,warning=FALSE}
+
+plot5 <- ggplot(data = subset(dfnew, dfnew$acl_total < 150), aes(x = age, y = acl_total, color = thrombosis)) +
+  geom_point(size = 1.7) +
+  facet_grid(cols = vars(sex)) +
+  labs(
+    title = "Relation between anti-Cardiolipin antibody and age by different sex",
+    y = "Anti-Cardiolipin antibody degree",
+    x = "Age"
+  ) +
+  theme(
+    text = element_text(size = 12),
+    legend.position = "right"
+  ) +
+  scale_colour_manual("Thrombosis degree", values = c("red", "blue", "green"))
+
+plot(plot5)
+ggsave("./images/plot-05.png", width = 10, height = 7)
+```
+
+## Technical summary
+
+First, I will talk about the data sets themselves. As I mentioned in the data summary part, the data sets contain patients information of auto-immune disease. The first data set includes basic information of those patients. I immediately found duplicate IDs when I started to deal with this data set. This surely does not make sense, and it is perhaps because of input mistake of patient information. The second data set contains information about the patients’ special laboratory examinations. When I tried to merge the data, it is surprising that only half of the patient ID in this data set can be also find in the first one, which means only a part of patients who took the special test are related to the auto-immune disease. The third data set includes all the ordinary laboratory examination results. Since one patient can take more than one ordinary laboratory examination, there are too many rows in this table. It is unfortunate that the data sets are not very tidy and much information in those data sets can not be deeply digested. For example, same variable ‘IGG’ in the second data set and the third data set has different scales and I do not exactly know the unit used in both data sets, which bring difficulty to further analysis.
+
+As for EDA part, I find it useful to utilize boxplot and histogram to visualize numeric data, while barplot is ideal for categorical variables. Also, missing values sometimes influence the data visualization and also data modeling, therefore, it is always important to consider them at first. Aggr function from VIM library can be a nice tool to visualize the missing values. 
+
+
+
